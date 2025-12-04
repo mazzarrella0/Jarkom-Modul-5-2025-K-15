@@ -212,6 +212,147 @@ dig @10.71.2.11 example.com  # Timeout
 iptables -A INPUT -p udp --dport 53 -v -n
 ```
 
+## Soal 2.4: Batas Koneksi ke IronHills (Connlimit)
+
+#### Tujuan
+Membatasi akses ke **IronHills** (`10.71.2.19`) hanya **3 koneksi aktif** per IP dalam waktu bersamaan, untuk mencegah *overload*
+
+#### Penjelasan Kode
+**Batas Koneksi ke IronHills**:
+
+```bash
+# Batas 3 koneksi aktif per IP ke IronHills
+iptables -A FORWARD -s 10.71.0.0/16 -d 10.71.2.19 -p tcp --syn \
+-m connlimit --connlimit-above 3 --connlimit-mask 32 -j DROP
+```
+
+  - `-A FORWARD`: Aturan diterapkan pada *traffic* yang melewati **Moria** menuju DMZ.
+  - `-s 10.71.0.0/16`: Menargetkan semua *client* di jaringan Aliansi (`10.71.x.x`).
+  - `-d 10.71.2.19`: Menargetkan IP **IronHills**.
+  - `--syn`: Hanya paket TCP *initial handshake* (koneksi baru).
+  - `-m connlimit`: Menggunakan modul `connlimit` untuk menghitung koneksi bersamaan.
+  - `--connlimit-above 3`: Menjalankan aksi (`DROP`) jika jumlah koneksi aktif **melebihi 3**.
+  - `--connlimit-mask 32`: Menghitung batas per host unik (`/32`).
+  - `-j DROP`: Membuang koneksi baru yang melebihi batas.
+
+#### Strategi Firewall
+
+```
+1. Paket TCP SYN (koneksi baru) tiba di Moria menuju IronHills.
+2. Kernel menggunakan modul connlimit untuk menghitung koneksi aktif dari source IP.
+3. Jika jumlah koneksi aktif sudah > 3, paket SYN di DROP.
+4. Jika jumlah koneksi aktif <= 3, paket diizinkan melanjutkan (ACCEPT default policy).
+```
+
+#### Verifikasi
+
+```bash
+# Dari Client (misalnya Elendil), coba buka 4 koneksi secara bersamaan:
+# Koneksi ke-4 harus gagal atau mengalami timeout.
+# Gunakan tool 'ab' (ApacheBench) atau 4 terminal 'curl' secara simultan.
+
+# Contoh: Dari Elendil (10.71.0.2)
+curl -s -o /dev/null -w "%{http_code}" 10.71.2.19 & \
+curl -s -o /dev/null -w "%{http_code}" 10.71.2.19 & \
+curl -s -o /dev/null -w "%{http_code}" 10.71.2.19 & \
+curl -s -o /dev/null -w "%{http_code}" 10.71.2.19
+
+# Harapan: 3 koneksi pertama berhasil, koneksi ke-4 ter-DROP.
+```
+
+-----
+
+## Soal 2.5: Traffic Redirect (Sihir Hitam)
+
+#### Tujuan
+Mengalihkan paket yang dikirim **Vilya** (`10.71.2.10`) menuju **Khamul** (`10.71.2.2`) agar dibelokkan ke **IronHills** (`10.71.2.18`)
+
+#### Penjelasan Kode
+**Pengalihan Destinasi (DNAT)**:
+
+```bash
+# Redirect paket dari Vilya menuju Khamul, diubah tujuannya menjadi IronHills
+iptables -t nat -A PREROUTING -s 10.71.2.10 -d 10.71.2.2 -j DNAT --to-destination 10.71.2.18
+```
+
+  - `-t nat`: Menargetkan tabel NAT (Network Address Translation).
+  - `-A PREROUTING`: Chain yang dijalankan *sebelum* keputusan *routing* dibuat.
+  - `-s 10.71.2.10`: Sumber paket adalah **Vilya**.
+  - `-d 10.71.2.2`: Destinasi asli paket adalah **Khamul**.
+  - `-j DNAT --to-destination 10.71.2.18`: Mengubah alamat IP tujuan dari Khamul menjadi **IronHills**.
+
+#### Strategi Firewall
+
+```
+1. Paket dari Vilya (10.71.2.10) tiba di Moria.
+2. Moria melihat tujuan paket adalah Khamul (10.71.2.2).
+3. Aturan PREROUTING NAT mengubah tujuan paket menjadi IronHills (10.71.2.18).
+4. Moria meneruskan paket yang sekarang menuju IronHills.
+```
+
+#### Verifikasi
+
+```bash
+# Dari Vilya, coba koneksi ke IP Khamul (10.71.2.2) menggunakan nc atau ping.
+# Paket harus mencapai IronHills (10.71.2.18) dan mendapat respons dari sana.
+
+# Pada Vilya:
+nc -z 10.71.2.2 80  # Mencoba koneksi ke Khamul di port 80
+
+# Pada IronHills:
+# Monitoring traffic (harus terlihat paket dari 10.71.2.10)
+tcpdump -i eth0 host 10.71.2.10 and port 80 
+```
+
+## Soal 3: Isolasi Sang Nazgûl (Khamul)
+
+#### Tujuan
+Blokir **semua lalu lintas masuk dan keluar** dari **Khamul** (`10.71.2.2`), mengisolasi pengkhianat tersebut dari seluruh jaringan.
+
+#### Penjelasan Kode
+**Isolasi Total Host**:
+
+```bash
+# 1. BLOKIR TRAFFIC KELUAR DARI KHAMUL (FORWARD CHAIN)
+iptables -A FORWARD -s 10.71.2.2 -j DROP
+
+# 2. BLOKIR TRAFFIC MASUK KE KHAMUL (FORWARD CHAIN)
+iptables -A FORWARD -d 10.71.2.2 -j DROP
+
+# 3. BLOKIR AKSES KE MORIA DARI KHAMUL (INPUT CHAIN)
+iptables -A INPUT -s 10.71.2.2 -j DROP
+
+# 4. BLOKIR AKSES DARI MORIA KE KHAMUL (OUTPUT CHAIN)
+iptables -A OUTPUT -d 10.71.2.2 -j DROP
+```
+
+  - **`iptables -A FORWARD -s 10.71.2.2 -j DROP`**: Aturan ini memblokir **semua lalu lintas yang berasal dari Khamul** yang mencoba melewati Moria menuju jaringan lain (seperti Internet, DMZ, atau *client* lain). Ini memastikan Khamul tidak dapat mengirim data *keluar*.
+  - **`iptables -A FORWARD -d 10.71.2.2 -j DROP`**: Aturan ini memblokir **semua lalu lintas yang ditujukan ke Khamul** dari jaringan lain. Ini memastikan Khamul tidak dapat menerima perintah atau data dari manapun.
+  - **`iptables -A INPUT -s 10.71.2.2 -j DROP`**: Aturan ini memblokir Khamul untuk mengakses **Router Moria** secara lokal (misalnya, *ping* atau *telnet* ke *interface* Moria).
+  - **`iptables -A OUTPUT -d 10.71.2.2 -j DROP`**: Aturan ini memblokir router **Moria** untuk melakukan komunikasi apapun ke Khamul.
+
+#### Strategi Firewall
+
+```
+1. Paket berasal dari Khamul (source) menuju manapun → DROP (FORWARD).
+2. Paket dari manapun (destination) menuju Khamul → DROP (FORWARD).
+3. INPUT/OUTPUT chains memastikan Moria sendiri tidak dapat berkomunikasi dengan Khamul, menciptakan isolasi total
+```
+
+#### Verifikasi
+
+```bash
+# Dari Moria, coba ping Khamul (Output Chain harus memblokir)
+ping 10.71.2.2
+
+# Dari Client lain (misalnya Elendil), coba ping Khamul (Forward Chain harus memblokir)
+ping 10.71.2.2
+
+# Hasil: Request timed out (terisolasi total)
+
+# Tampilkan rules FORWARD untuk memverifikasi isolasi
+iptables -L FORWARD -n -v
+```
 ---
 
 ## Struktur File Script
@@ -254,7 +395,19 @@ bash script_project.sh
 - Konfigurasi iptables UDP 53 filtering
 - Allow hanya dari Vilya, block yang lain
 
----
+### `Soal_2_4-2_5.sh`
+**Fungsi**: Implementasi keamanan DMZ (Port Scan & Connlimit) dan **Redirect Traffic**
+**Isi**:
+* Konfigurasi **Anti Port Scan** (`recent` module) dari Elendil ke Palantir
+* Konfigurasi **Batas Koneksi** (`connlimit` module) ke IronHills (maksimal 3 koneksi aktif per IP)
+* Konfigurasi **Traffic Redirect (DNAT)** untuk membelokkan paket Vilya menuju Khamul ke IronHills
+
+### `Soal_3.sh`
+**Fungsi**: Implementasi **Isolasi Total** untuk Sang Nazgûl (Khamul).
+**Isi**:
+* Blokir **semua lalu lintas masuk** ke Khamul (`iptables -A FORWARD -d... -j DROP`).
+* Blokir **semua lalu lintas keluar** dari Khamul (`iptables -A FORWARD -s... -j DROP`).
+* Tambahan blokir di *INPUT* dan *OUTPUT* *chain* untuk isolasi total dari *router* Moria.
 
 ---
 
